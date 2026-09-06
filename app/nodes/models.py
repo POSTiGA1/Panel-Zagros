@@ -94,6 +94,10 @@ class LifecycleBody(BaseModel):
     settings: dict[str, Any] = Field(default_factory=dict)
     purge: bool = False
     force: bool = False
+    # Install/update historically meant "configure and serve".  Keep that
+    # compatibility default while allowing the dashboard's Start after install
+    # switch to request an installed+configured but stopped core.
+    start_after: bool = True
     # Pin the release to install/update to ('' = whatever the node defaults to).
     version: str | None = None
 

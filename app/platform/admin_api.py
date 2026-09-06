@@ -2081,7 +2081,7 @@ async def nodes_core_lifecycle(node_id: int, core_id: str,
         result = await core_lifecycle(
             runtime, node_id, core_id, action=body.action,
             settings=body.settings, purge=body.purge, force=body.force,
-            version=body.version)
+            version=body.version, start_after=body.start_after)
     except Exception as exc:  # noqa: BLE001
         raise _node_http_error(exc) from exc
     return result

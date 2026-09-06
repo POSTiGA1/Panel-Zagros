@@ -250,7 +250,7 @@ def _render_link_artifact(page: PortalPage, artifact) -> str:
     qr = ""
     if artifact.qr:
         qr = (
-            f'<details><summary><button class="btn ghost" type="button">{_esc(_t(page, "show_qr"))}</button></summary>'
+            f'<details><summary class="btn ghost">{_esc(_t(page, "show_qr"))}</summary>'
             f'<div class="qrbox">{_qr_svg(url)}</div></details>'
         )
     note = f'<div class="note">{_esc(artifact.note)}</div>' if artifact.note else ""
@@ -273,7 +273,7 @@ def _render_artifact(page: PortalPage, artifact) -> str:
         qr = ""
         if artifact.qr:
             qr = (
-                f'<details><summary><button class="btn ghost" type="button">{_esc(_t(page, "show_qr"))}</button></summary>'
+                f'<details><summary class="btn ghost">{_esc(_t(page, "show_qr"))}</summary>'
                 f'<div class="qrbox">{_qr_svg(artifact.content)}</div></details>'
             )
         return (

@@ -572,7 +572,8 @@ async def update_core_settings(runtime, node_id: int, core_id: str,
 
 async def core_lifecycle(runtime, node_id: int, core_id: str, *, action: str,
                          settings: dict | None = None, purge: bool = False,
-                         force: bool = False, version: str | None = None) -> dict:
+                         force: bool = False, version: str | None = None,
+                         start_after: bool = True) -> dict:
     if action not in NODE_ACTIONS:
         raise ValueError(f"action must be one of {list(NODE_ACTIONS)}")
     row = await asyncio.to_thread(_get_row, runtime, node_id)
@@ -591,16 +592,28 @@ async def core_lifecycle(runtime, node_id: int, core_id: str, *, action: str,
     result = await asyncio.to_thread(
         _client(runtime, row).lifecycle, core_id, action, settings=effective,
         purge=purge, force=force)
-    # A freshly installed core owns no listeners yet: it cannot start, and it
-    # serves nothing, until this panel's configuration reaches it. Converge it
-    # here so "install" means "installed and serving", not "installed, now go
-    # find the sync button".
+    # A freshly installed core owns no listeners yet: push this panel's
+    # configuration before it can serve.  ``start_after`` is the ONE lifecycle
+    # decision for the whole install flow — the dashboard must not send a
+    # second start after convergence has already started the core.
     if action in ("install", "update"):
-        try:
-            result["convergence"] = await converge_node(
-                runtime, node_id, core_ids=[core_id])
-        except Exception as exc:  # noqa: BLE001 — the action itself succeeded
-            result["convergence"] = {"errors": [str(exc)]}
+        if start_after:
+            try:
+                result["convergence"] = await converge_node(
+                    runtime, node_id, core_ids=[core_id])
+            except Exception as exc:  # noqa: BLE001 — the action itself succeeded
+                result["convergence"] = {"errors": [str(exc)]}
+        else:
+            try:
+                synced = await sync_node(runtime, node_id, core_ids=[core_id])
+            except Exception as exc:  # noqa: BLE001 — the action itself succeeded
+                result["convergence"] = {"started": [], "errors": [f"sync: {exc}"]}
+            else:
+                result["convergence"] = {
+                    "synced": synced.model_dump(mode="json"),
+                    "started": [],
+                    "errors": list(synced.errors or []),
+                }
     # Refresh the cached inventory so the UI reflects the change immediately.
     try:
         await heartbeat(runtime, node_id)

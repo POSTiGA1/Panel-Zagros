@@ -318,11 +318,24 @@ class UserModify(User):
 
     @property
     def excluded_inbounds(self):
+        """Translate the legacy include-list into persisted exclusions.
+
+        Marzban/Zagros uses ``{protocol: []}`` as the canonical spelling for
+        "all current inbounds of this protocol" (the create model and the
+        dashboard inbound tree already follow that contract).  The modify
+        path previously interpreted the same empty list as "exclude every
+        inbound". Editing an existing user after adding a VLESS inbound then
+        persisted the new tag as excluded, so both VLESS and the user's old
+        Shadowsocks section rendered as unavailable in the portal.
+        """
         excluded = {}
-        for proxy_type in self.inbounds:
+        for proxy_type, selected in self.inbounds.items():
             excluded[proxy_type] = []
+            if not selected:
+                continue  # canonical wildcard: every current inbound
+            selected_tags = set(selected)
             for inbound in xray.config.inbounds_by_protocol.get(proxy_type, []):
-                if not inbound["tag"] in self.inbounds.get(proxy_type, []):
+                if inbound["tag"] not in selected_tags:
                     excluded[proxy_type].append(inbound["tag"])
 
         return excluded

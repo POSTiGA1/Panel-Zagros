@@ -10,7 +10,7 @@ import asyncio
 import logging
 import time
 
-__version__ = "1.0.4"
+__version__ = "1.0.5"
 
 
 _building = False

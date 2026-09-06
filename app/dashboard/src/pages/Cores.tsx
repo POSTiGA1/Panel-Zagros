@@ -476,18 +476,10 @@ function NodeInstallDialog({ node, entry, onClose, onDone }: {
     try {
       await api.post(
         `/zagros/nodes/${node.id}/cores/${encodeURIComponent(entry.id)}/lifecycle`,
-        { action: "install", settings, purge: false, force: false });
-      toast.ok(`${entry.id} installed on ${node.name}`);
-      if (startNow) {
-        try {
-          await api.post(
-            `/zagros/nodes/${node.id}/cores/${encodeURIComponent(entry.id)}/lifecycle`,
-            { action: "start", settings: {}, purge: false, force: false });
-          toast.ok(`${entry.id} started`);
-        } catch (e) {
-          toast.error(`start: ${e instanceof ApiError ? e.message : t("common.error")}`);
-        }
-      }
+        { action: "install", settings, purge: false, force: false, start_after: startNow });
+      toast.ok(startNow
+        ? `${entry.id} installed and started on ${node.name}`
+        : `${entry.id} installed on ${node.name}`);
       onDone();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : t("common.error"));
