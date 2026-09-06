@@ -240,10 +240,22 @@ class ZagrosNodeClient:
         return self._request("PUT", "/v1/bandwidth/limits",
                              payload={"limits": limits}, timeout=120)
 
-    def apply_inbounds(self, core_id: str, document: dict) -> dict:
+    def apply_inbounds(self, core_id: str, document: dict, *,
+                       material: dict[str, str] | None = None) -> dict:
+        """Apply a listener document and any node-local TLS material it needs.
+
+        Xray's native document stores certificate *paths*.  A path on the
+        master is meaningless on another host, so the panel replaces those
+        paths with opaque ``zagros-material://`` references and carries the
+        validated PEM pair here.  The node is the only side that chooses the
+        final path, confined to its own Xray data directory.
+        """
+        payload: dict = {"document": document}
+        if material:
+            payload["material"] = material
         return self._request(
             "PUT", f"/v1/cores/{core_id}/inbounds",
-            payload={"document": document}, timeout=120)
+            payload=payload, timeout=120)
 
     # ------------------------------------------------------------------ #
     # lifecycle (job-based)

@@ -20,13 +20,16 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import datetime as _dt
 import hashlib
 import json
 import os
+import re
 import secrets
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
@@ -709,6 +712,96 @@ def _xray_document_with_accounts() -> dict | None:
     return document if isinstance(document, dict) else None
 
 
+_NODE_MATERIAL_PREFIX = "zagros-material://"
+_NODE_TLS_FILE_LIMIT = 32
+_NODE_TLS_ITEM_BYTES = 128 * 1024
+_NODE_TLS_TOTAL_BYTES = 2 * 1024 * 1024
+
+
+def _node_inbound_payload(core_id: str, document: dict) -> tuple[dict, dict[str, str]]:
+    """Return a node-safe copy of a core document and its sealed file material.
+
+    Native Xray TLS listeners refer to certificate files by absolute path.
+    Copying that JSON to another host used to copy the master's path verbatim,
+    leaving node Xray to die with ``no such file or directory``.  Replace each
+    pair with an opaque transport reference and send the PEM alongside the
+    signed, certificate-pinned request.  The node resolves the reference into
+    its own confined Xray cert directory; it never honours a panel-supplied
+    destination path.
+    """
+    if core_id != LEGACY_CORE_ID:
+        return document, {}
+
+    prepared = copy.deepcopy(document)
+    material: dict[str, str] = {}
+    total = 0
+    used: set[str] = set()
+    for inbound_index, inbound in enumerate(prepared.get("inbounds") or []):
+        if not isinstance(inbound, dict):
+            continue
+        stream = inbound.get("streamSettings") or {}
+        tls = stream.get("tlsSettings") or {}
+        certificates = tls.get("certificates") or []
+        if not isinstance(certificates, list):
+            continue
+        tag = re.sub(r"[^A-Za-z0-9_.-]+", "_",
+                     str(inbound.get("tag") or f"inbound-{inbound_index}"))
+        tag = (tag.strip("._-") or f"inbound-{inbound_index}")[:64]
+        for cert_index, pair in enumerate(certificates):
+            if not isinstance(pair, dict):
+                continue
+            cert_path = pair.get("certificateFile")
+            key_path = pair.get("keyFile")
+            if not cert_path and not key_path:
+                continue  # inline Xray certificate arrays need no host file
+            if not cert_path or not key_path:
+                raise ValueError(
+                    f"xray TLS inbound '{tag}' must reference both a certificate "
+                    "file and a private-key file")
+            if (str(cert_path).startswith(_NODE_MATERIAL_PREFIX)
+                    or str(key_path).startswith(_NODE_MATERIAL_PREFIX)):
+                raise ValueError("reserved node TLS material reference in master config")
+            if len(material) + 2 > _NODE_TLS_FILE_LIMIT:
+                raise ValueError("xray node sync carries too many TLS certificate files")
+            try:
+                cert_raw = Path(str(cert_path)).read_bytes()
+                key_raw = Path(str(key_path)).read_bytes()
+            except OSError as exc:
+                raise ValueError(
+                    f"xray TLS inbound '{tag}' cannot read its certificate pair: {exc}") from exc
+            if (len(cert_raw) > _NODE_TLS_ITEM_BYTES
+                    or len(key_raw) > _NODE_TLS_ITEM_BYTES):
+                raise ValueError(
+                    f"xray TLS inbound '{tag}' certificate material is too large")
+            total += len(cert_raw) + len(key_raw)
+            if total > _NODE_TLS_TOTAL_BYTES:
+                raise ValueError("xray node sync TLS material exceeds 2 MiB")
+            try:
+                cert_pem, key_pem = cert_raw.decode("utf-8"), key_raw.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise ValueError(
+                    f"xray TLS inbound '{tag}' certificate pair is not PEM text") from exc
+            from app.studio.certs import CertificateError, validate_pem_pair
+
+            try:
+                validate_pem_pair(cert_pem, key_pem,
+                                  context=f"xray TLS inbound '{tag}'")
+            except CertificateError as exc:
+                raise ValueError(str(exc)) from exc
+
+            stem = tag if cert_index == 0 else f"{tag}-{cert_index + 1}"
+            candidate, serial = stem, 2
+            while candidate in used:
+                candidate, serial = f"{stem}-{serial}", serial + 1
+            used.add(candidate)
+            cert_name, key_name = f"{candidate}.crt", f"{candidate}.key"
+            material[cert_name] = cert_pem
+            material[key_name] = key_pem
+            pair["certificateFile"] = _NODE_MATERIAL_PREFIX + cert_name
+            pair["keyFile"] = _NODE_MATERIAL_PREFIX + key_name
+    return prepared, material
+
+
 def _core_accounts(runtime, core_id: str) -> list[dict] | None:
     """Every live account the master holds for one core (credentials included).
 
@@ -786,7 +879,9 @@ def _account_payload(runtime, core_id: str):
 
 
 async def _push_core_accounts(runtime, client, core_id: str, *,
-                              payload, apply: bool) -> tuple[int | None, str | None]:
+                              payload, apply: bool,
+                              xray_tls_material: bool = False,
+                              ) -> tuple[int | None, str | None]:
     """Move one core's accounts onto a node. Returns ``(count, error)``.
 
     xray carries its users inside the configuration document; every other
@@ -798,7 +893,14 @@ async def _push_core_accounts(runtime, client, core_id: str, *,
         if not payload or not (payload.get("inbounds") or []):
             return None, None
         if apply:
-            await asyncio.to_thread(client.apply_inbounds, core_id, payload)
+            document, material = await asyncio.to_thread(
+                _node_inbound_payload, core_id, payload)
+            if material and not xray_tls_material:
+                return None, (
+                    "node agent does not advertise secure Xray TLS material "
+                    "sync — update the node before applying this TLS document")
+            await asyncio.to_thread(
+                client.apply_inbounds, core_id, document, material=material)
         return (sum(_clients(inbound) for inbound in (payload.get("inbounds") or [])
                     if isinstance(inbound, dict)), None)
     if payload is None:
@@ -855,6 +957,8 @@ async def push_node_accounts(runtime, node_id: int, *,
     client = _client(runtime, row)
     inventory = await asyncio.to_thread(client.cores)
     installed = dict(inventory.get("installed") or {})
+    features = dict(inventory.get("features") or {})
+    supports_xray_tls_material = bool(features.get("xray_tls_material"))
     master_cores = set(runtime.core_manager.list_cores())
 
     result: dict[str, Any] = {"node_id": node_id, "pushed": [], "skipped": [],
@@ -883,7 +987,8 @@ async def push_node_accounts(runtime, node_id: int, *,
             continue
         try:
             count, error = await _push_core_accounts(
-                runtime, client, core_id, payload=payload, apply=True)
+                runtime, client, core_id, payload=payload, apply=True,
+                xray_tls_material=supports_xray_tls_material)
         except NodeClientError as exc:
             result["errors"].append(f"{core_id}: {exc}")
             continue
@@ -965,6 +1070,8 @@ async def sync_node(runtime, node_id: int, *,
     client = _client(runtime, row)
     inventory = await asyncio.to_thread(client.cores)
     installed = dict(inventory.get("installed") or {})
+    features = dict(inventory.get("features") or {})
+    supports_xray_tls_material = bool(features.get("xray_tls_material"))
     master_cores = set(runtime.core_manager.list_cores())
 
     result = SyncResult(node_id=node_id)
@@ -991,8 +1098,16 @@ async def sync_node(runtime, node_id: int, *,
         identity_applied = await _push_identity(runtime, client, core_id, result)
 
         try:
-            applied = await asyncio.to_thread(client.apply_inbounds, core_id, document)
-        except NodeClientError as exc:
+            node_document, material = await asyncio.to_thread(
+                _node_inbound_payload, core_id, document)
+            if material and not supports_xray_tls_material:
+                result.errors.append(
+                    f"{core_id}: node agent does not advertise secure Xray TLS "
+                    "material sync — update the node before applying this TLS document")
+                continue
+            applied = await asyncio.to_thread(
+                client.apply_inbounds, core_id, node_document, material=material)
+        except (NodeClientError, ValueError) as exc:
             result.errors.append(f"{core_id}: {exc}")
             continue
         pushed: dict[str, Any] = {

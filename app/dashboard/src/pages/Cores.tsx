@@ -210,7 +210,11 @@ function NodeCoresPanel({ node }: { node: Node }) {
     }) => api.post(`/zagros/nodes/${node.id}/cores/${encodeURIComponent(core)}/lifecycle`,
       { action, settings: settings ?? {}, purge: Boolean(doPurge), force: false,
         ...(version ? { version } : {}) }),
-    onSuccess: (_d, v) => { toast.ok(`${node.name}: ${v.core} ${v.action}`); invalidate(); },
+    onSuccess: (_d, v) => {
+      toast.ok(`${node.name}: ${v.core} ${v.action}`);
+      if (v.action === "uninstall") setUninstallFor(null);
+      invalidate();
+    },
     onError: (e) => toast.error(e instanceof ApiError ? e.message : t("common.error")),
     onSettled: invalidate,
   });
@@ -315,24 +319,25 @@ function NodeCoresPanel({ node }: { node: Node }) {
                 <div className="mt-4 flex flex-wrap items-center gap-1.5 border-t border-border pt-3.5">
                   {core.state === "running" ? (
                     <>
-                      <Button size="sm" variant="secondary"
+                      <Button size="sm" variant="secondary" disabled={act.isPending}
                         onClick={() => act.mutate({ core: core.core_id, action: "stop" })}>
                         <Square size={13} />{t("stop")}</Button>
-                      <Button size="sm" variant="secondary"
+                      <Button size="sm" variant="secondary" disabled={act.isPending}
                         onClick={() => act.mutate({ core: core.core_id, action: "restart" })}>
                         <RotateCw size={13} />{t("restart")}</Button>
                     </>
                   ) : (
-                    <Button size="sm"
+                    <Button size="sm" disabled={act.isPending}
                       onClick={() => act.mutate({ core: core.core_id, action: "start" })}>
                       <Play size={13} /> start</Button>
                   )}
                   <Button size="sm" variant="ghost" onClick={() => setLogsFor(core.core_id)}>
                     <FileText size={13} />{t("logs")}</Button>
-                  <Button size="sm" variant="ghost" onClick={() => setVersionFor(core.core_id)}>
+                  <Button size="sm" variant="ghost" disabled={act.isPending}
+                    onClick={() => setVersionFor(core.core_id)}>
                     <ArrowUpDown size={13} />{t("change version")}</Button>
                   <div className="ms-auto">
-                    <Button size="sm" variant="danger"
+                    <Button size="sm" variant="danger" disabled={act.isPending}
                       onClick={() => { setPurge(false); setUninstallFor(core); }}>
                       <Trash2 size={13} />
                     </Button>
